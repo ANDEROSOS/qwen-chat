@@ -34,27 +34,67 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0"
 ]
 
-# Cargar modelos
-print("[*] Cargando Qwen2.5-1.5B-Instruct...")
-llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
-llm_model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    torch_dtype=torch.float32,
-    device_map="cpu",
-    low_cpu_mem_usage=True
-)
-llm_model.eval()
-print("[OK] Qwen2.5-1.5B cargado")
+# Variables globales para modelos (carga lazy)
+llm_tokenizer = None
+llm_model = None
+embed_tokenizer = None
+embed_model = None
+models_loaded = False
+models_loading = False
+models_lock = threading.Lock()
 
-print("[*] Cargando modelo de embeddings...")
-embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-embed_model = AutoModel.from_pretrained(
-    "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
-    torch_dtype=torch.float32
-)
-embed_model.eval()
-print("[OK] Embeddings cargados")
-print("[WEB] Sistema de busqueda web activado")
+def load_models():
+    """Carga los modelos de forma lazy (en segundo plano o al primer uso)"""
+    global llm_tokenizer, llm_model, embed_tokenizer, embed_model, models_loaded, models_loading
+
+    with models_lock:
+        if models_loaded or models_loading:
+            return
+        models_loading = True
+
+    try:
+        print("[*] Cargando Qwen2.5-1.5B-Instruct...")
+        llm_tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+        llm_model = AutoModelForCausalLM.from_pretrained(
+            "Qwen/Qwen2.5-1.5B-Instruct",
+            torch_dtype=torch.float32,
+            device_map="cpu",
+            low_cpu_mem_usage=True
+        )
+        llm_model.eval()
+        print("[OK] Qwen2.5-1.5B cargado")
+
+        print("[*] Cargando modelo de embeddings...")
+        embed_tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
+        embed_model = AutoModel.from_pretrained(
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+            torch_dtype=torch.float32
+        )
+        embed_model.eval()
+        print("[OK] Embeddings cargados")
+        print("[WEB] Sistema de busqueda web activado")
+
+        with models_lock:
+            models_loaded = True
+            models_loading = False
+    except Exception as e:
+        print(f"[ERROR] Error cargando modelos: {e}")
+        with models_lock:
+            models_loading = False
+        raise
+
+def ensure_models_loaded():
+    """Asegura que los modelos estén cargados antes de usarlos"""
+    global models_loaded
+    if not models_loaded:
+        load_models()
+    return models_loaded
+
+# Iniciar carga de modelos en segundo plano al arrancar
+def start_background_model_loading():
+    thread = threading.Thread(target=load_models, daemon=True)
+    thread.start()
+    print("[*] Iniciando carga de modelos en segundo plano...")
 
 # ==================== SISTEMA DE BÚSQUEDA WEB ====================
 
@@ -1669,7 +1709,50 @@ HTML_TEMPLATE = """
         let currentFilename = '';
         let hasDocument = false;
         let webSearchEnabled = true;
+        let modelsReady = false;
         const sessionId = 'session_' + Date.now();
+
+        // Verificar estado de modelos al cargar
+        async function checkModelStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                modelsReady = data.ready;
+
+                const welcomeSubtitle = document.querySelector('.welcome-subtitle');
+                if (!modelsReady && welcomeSubtitle) {
+                    if (data.loading) {
+                        welcomeSubtitle.innerHTML = `
+                            <div style="display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--accent-color); margin-bottom: 12px;">
+                                <div class="thinking-dots" style="display: flex; gap: 4px;">
+                                    <div class="thinking-dot"></div>
+                                    <div class="thinking-dot"></div>
+                                    <div class="thinking-dot"></div>
+                                </div>
+                                <span>Cargando modelos de IA...</span>
+                            </div>
+                            <span style="color: var(--text-secondary);">
+                                La primera carga puede tomar unos minutos. Una vez listo, podre ayudarte con busquedas web y analisis de documentos.
+                            </span>
+                        `;
+                        // Verificar de nuevo en 5 segundos
+                        setTimeout(checkModelStatus, 5000);
+                    }
+                } else if (modelsReady && welcomeSubtitle) {
+                    welcomeSubtitle.innerHTML = `
+                        Soy un asistente con acceso a internet. Puedo buscar informacion actualizada,
+                        analizar documentos y mantener conversaciones con memoria contextual.
+                    `;
+                }
+            } catch (error) {
+                console.error('Error checking model status:', error);
+                // Reintentar en 3 segundos
+                setTimeout(checkModelStatus, 3000);
+            }
+        }
+
+        // Verificar estado al cargar la página
+        document.addEventListener('DOMContentLoaded', checkModelStatus);
 
         function toggleWebSearch() {
             webSearchEnabled = !webSearchEnabled;
@@ -1728,6 +1811,23 @@ HTML_TEMPLATE = """
 
             if (!message && !currentFile) {
                 return;
+            }
+
+            // Verificar si los modelos están listos
+            if (!modelsReady) {
+                // Verificar estado actual
+                try {
+                    const response = await fetch('/status');
+                    const data = await response.json();
+                    if (!data.ready) {
+                        alert('Los modelos de IA aun se están cargando. Por favor espera unos segundos e intenta de nuevo.');
+                        return;
+                    }
+                    modelsReady = true;
+                } catch (e) {
+                    alert('Error verificando estado del servidor.');
+                    return;
+                }
             }
 
             hideWelcome();
@@ -2072,9 +2172,20 @@ def home():
 def health():
     return jsonify({
         "status": "healthy",
+        "models_loaded": models_loaded,
+        "models_loading": models_loading,
         "ocr_api": OCR_API_URL,
         "llm": "Qwen2.5-1.5B + paraphrase-multilingual-MiniLM-L12-v2",
         "web_search": "enabled"
+    })
+
+@app.route('/status', methods=['GET'])
+def status():
+    """Endpoint para que el frontend verifique el estado de carga"""
+    return jsonify({
+        "ready": models_loaded,
+        "loading": models_loading,
+        "message": "Listo" if models_loaded else ("Cargando modelos de IA..." if models_loading else "Esperando inicio")
     })
 
 @app.route('/clear_session', methods=['POST'])
@@ -2090,6 +2201,17 @@ def clear_session():
 @app.route('/chat', methods=['POST'])
 def chat():
     try:
+        # Asegurar que los modelos estén cargados
+        if not models_loaded:
+            if models_loading:
+                return jsonify({
+                    "success": False,
+                    "error": "Los modelos de IA se están cargando. Por favor espera unos segundos e intenta de nuevo."
+                }), 503
+            else:
+                # Forzar carga síncrona si no se inició
+                ensure_models_loaded()
+
         data = request.json
         message = data.get('message', '').strip()
         image_data = data.get('image')
@@ -2258,19 +2380,15 @@ def chat():
             "error": f"Error interno: {str(e)}"
         }), 500
 
-    except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        print(f"ERROR: {error_trace}")
-        return jsonify({
-            "success": False,
-            "error": f"Error interno: {str(e)}"
-        }), 500
-
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 7860))
     print(f"[*] Iniciando servidor en puerto {port}...")
     print(f"[WEB] Busqueda web: ACTIVADA")
     print(f"[DOC] Analisis de documentos: ACTIVADO")
+
+    # Iniciar carga de modelos en segundo plano
+    start_background_model_loading()
+
+    # Iniciar servidor inmediatamente (no espera modelos)
     app.run(host='0.0.0.0', port=port, debug=False)
