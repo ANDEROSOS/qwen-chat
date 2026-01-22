@@ -7,13 +7,16 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar requirements primero (para cache de Docker)
+# Copiar requirements
 COPY requirements.txt .
 
-# Instalar dependencias de Python
+# Instalar PyTorch CPU-only (mucho mas pequeno ~200MB vs 3GB)
+RUN pip install --no-cache-dir torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
+
+# Instalar resto de dependencias
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código
+# Copiar el codigo
 COPY app.py .
 
 # Variables de entorno
@@ -26,9 +29,6 @@ RUN mkdir -p /app/cache
 
 # Puerto
 EXPOSE 7860
-
-# Los modelos se descargan en segundo plano al iniciar (lazy loading)
-# Esto permite que el servidor responda inmediatamente
 
 # Comando de inicio
 CMD ["python", "app.py"]
