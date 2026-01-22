@@ -1,0 +1,12 @@
+flask==3.0.0
+transformers==4.46.0
+torch==2.1.0
+Pillow==10.1.0
+requests==2.31.0
+accelerate==0.26.0
+numpy<2
+sentencepiece
+protobuf
+sentence-transformers
+beautifulsoup4==4.12.3
+lxml
