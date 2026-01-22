@@ -7,24 +7,28 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar archivos
+# Copiar requirements primero (para cache de Docker)
 COPY requirements.txt .
+
+# Instalar dependencias de Python
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copiar el código
 COPY app.py .
 
-# Pre-descargar modelos (esto tarda pero solo se hace una vez al construir)
-RUN python -c "from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel; \
-    print('Descargando Qwen2.5-1.5B-Instruct...'); \
-    AutoTokenizer.from_pretrained('Qwen/Qwen2.5-1.5B-Instruct'); \
-    AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-1.5B-Instruct'); \
-    print('Descargando modelo de embeddings...'); \
-    AutoTokenizer.from_pretrained('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'); \
-    AutoModel.from_pretrained('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'); \
-    print('Modelos descargados!')"
+# Variables de entorno
+ENV PORT=7860
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/app/cache
+
+# Crear directorio de cache
+RUN mkdir -p /app/cache
 
 # Puerto
 EXPOSE 7860
+
+# Los modelos se descargan en segundo plano al iniciar (lazy loading)
+# Esto permite que el servidor responda inmediatamente
 
 # Comando de inicio
 CMD ["python", "app.py"]
